@@ -8,7 +8,14 @@ merge more cubes into larger "perfect mips" and render fewer quads per frame.
 Visible geometry, textures, entities and lighting are not changed, except that
 exact duplicate entities (same type, position and attributes) are dropped.
 
-usage: optimize_map.py in.cgz [out.cgz]   (default: overwrite in.cgz)
+With --lite (for weak machines) it also thins out decoration mapmodels that are
+placed many times (rows of trees, fences, ...): of every model used at least
+LITE_MIN_COUNT times, only copies at least LITE_SPACING cubes apart are kept.
+Mapmodels are drawn whenever they are in view and open maps hide almost
+nothing, so this is usually the biggest saving. It changes how the map looks,
+so write it to a separate map (which needs a copy of the original map's .cfg).
+
+usage: optimize_map.py [--lite] in.cgz [out.cgz]   (default: overwrite in.cgz)
 """
 import gzip
 import struct
@@ -18,6 +25,9 @@ HEADERSIZE = 980
 SOLID, CORNER, FHF, CHF, SPACE, SEMISOLID = range(6)
 SMALLEST_FACTOR = 6
 INVISWTEX, INVISUTEX, INVISIBLE = 1, 2, 4
+MAPMODEL = 10
+LITE_MIN_COUNT = 20
+LITE_SPACING = 6
 
 
 class Sqr:
@@ -226,20 +236,46 @@ def mipstats(world, sfactor):
     return countperfectmips(wmip, sfactor)
 
 
+def thin_mapmodels(ents):
+    """Drop copies of often repeated mapmodels that are closer than LITE_SPACING to a kept copy."""
+    counts = {}
+    for e in ents:
+        if e[4] == MAPMODEL:
+            counts[e[5]] = counts.get(e[5], 0) + 1
+    kept, out = {}, []
+    for e in sorted(ents, key=lambda e: (e[0], e[1])):  # walk rows of models in order
+        if e[4] == MAPMODEL and counts[e[5]] >= LITE_MIN_COUNT:
+            near = kept.setdefault(e[5], [])
+            if any(max(abs(e[0] - k[0]), abs(e[1] - k[1])) < LITE_SPACING for k in near):
+                continue
+            near.append(e)
+        out.append(e)
+    keep = set(map(id, out))
+    return [e for e in ents if id(e) in keep]  # keep the original entity order
+
+
 def main():
-    if len(sys.argv) not in (2, 3):
+    args = sys.argv[1:]
+    lite = '--lite' in args
+    if lite:
+        args.remove('--lite')
+    if len(args) not in (1, 2):
         sys.exit(__doc__)
-    src = sys.argv[1]
-    dst = sys.argv[2] if len(sys.argv) == 3 else src
+    src = args[0]
+    dst = args[1] if len(args) == 2 else src
     header, sfactor, ents, world, trailer = load(src)
     before = mipstats(world, sfactor)
 
     unique = list(dict.fromkeys(ents))
+    thinned = thin_mapmodels(unique) if lite else unique
     optimize(world, sfactor)
     after = mipstats(world, sfactor)
-    save(dst, header, sfactor, unique, world, trailer)
+    save(dst, header, sfactor, thinned, world, trailer)
 
     print('removed %d duplicate entities' % (len(ents) - len(unique)))
+    if lite:
+        nmm = lambda l: sum(e[4] == MAPMODEL for e in l)
+        print('mapmodels: %d -> %d' % (nmm(unique), nmm(thinned)))
     print('perfect mips (mip0..mip%d) before: %s = %d cells' % (SMALLEST_FACTOR, ' / '.join(map(str, before)), sum(before)))
     print('perfect mips (mip0..mip%d) after:  %s = %d cells' % (SMALLEST_FACTOR, ' / '.join(map(str, after)), sum(after)))
 
